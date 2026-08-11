@@ -48,7 +48,7 @@ An industrial-grade IoT-Enabled Digital Twin platform designed to monitor physic
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/filtration-digital-twin.git
+git clone https://github.com/ShadesOfCyberak/filtration-digital-twin.git
 cd filtration-digital-twin
 
 # Create root environment file
