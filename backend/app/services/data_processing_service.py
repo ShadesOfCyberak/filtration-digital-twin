@@ -75,10 +75,10 @@ class DataProcessingService:
         Input: dict with pressure_inlet, pressure_outlet, flow, current
         Output: Enriched dict with processed metrics and features
         """
-        inlet = raw_data.get("pressure_inlet", 2.5)
-        outlet = raw_data.get("pressure_outlet", 2.0)
-        flow = raw_data.get("flow", 75.0)
-        current = raw_data.get("current", 3.5)
+        inlet = float(raw_data.get("pressure_inlet", 0.0))
+        outlet = float(raw_data.get("pressure_outlet", 0.0))
+        flow = float(raw_data.get("flow", 0.0))
+        current = float(raw_data.get("current", 0.0))
 
         # Append to buffers
         for key, val in [("pressure_inlet", inlet), ("pressure_outlet", outlet), ("flow", flow), ("current", current)]:

@@ -63,10 +63,9 @@ class DigitalTwinService:
         dt_sec = (now - self.last_update_timestamp).total_seconds()
         self.last_update_timestamp = now
         
-        # Accumulate time and volume
-        actual_flow = processed_telemetry["flow_rate"]
-        actual_dp = processed_telemetry["pressure_drop"]
-        actual_power = processed_telemetry["pump_power"]
+        actual_flow = float(processed_telemetry.get("flow_rate", 0.0))
+        actual_dp = float(processed_telemetry.get("pressure_drop", 0.0))
+        actual_power = float(processed_telemetry.get("pump_power", 0.0))
 
         self.time_since_backwash += dt_sec
         self.accumulated_volume += (actual_flow / 60.0) * dt_sec
@@ -102,8 +101,8 @@ class DigitalTwinService:
         return TwinState(
             timestamp=now,
             twin_id="filtration_system_001",
-            actual_pressure_inlet=processed_telemetry["pressure_inlet"],
-            actual_pressure_outlet=processed_telemetry["pressure_outlet"],
+            actual_pressure_inlet=float(processed_telemetry.get("pressure_inlet", 0.0)),
+            actual_pressure_outlet=float(processed_telemetry.get("pressure_outlet", 0.0)),
             actual_pressure_drop=actual_dp,
             actual_flow_rate=actual_flow,
             actual_pump_power=actual_power,

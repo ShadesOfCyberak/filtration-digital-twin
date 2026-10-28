@@ -135,6 +135,15 @@ class InfluxDBRepository(BaseRepository):
         return self._memory_alert_store[-20:]
 
 
+    async def write_maintenance_log(self, log_data: Dict[str, Any]) -> bool:
+        self._memory_maintenance_store.append(log_data)
+        if len(self._memory_maintenance_store) > 100:
+            self._memory_maintenance_store.pop(0)
+        return True
+
+    async def get_maintenance_logs(self, limit: int = 50) -> List[Dict[str, Any]]:
+        return self._memory_maintenance_store[-limit:]
+
     async def get_recent_twin_states(self, limit: int = 50) -> List[Dict[str, Any]]:
         return self._memory_twin_store[-limit:]
 

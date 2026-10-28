@@ -30,10 +30,10 @@ class MLInferenceService:
             logger.error(f"Error initializing ML baseline model: {e}")
 
     def predict(self, processed_telemetry: Dict[str, Any]) -> PredictionResponse:
-        dp = processed_telemetry.get("pressure_drop", 0.5)
-        flow = processed_telemetry.get("flow_rate", 75.0)
-        current = processed_telemetry.get("pump_current", 3.2)
-        ci = processed_telemetry.get("clogging_index", 110.0)
+        dp = float(processed_telemetry.get("pressure_drop", 0.0))
+        flow = float(processed_telemetry.get("flow_rate", 0.0))
+        current = float(processed_telemetry.get("pump_current", 0.0))
+        ci = float(processed_telemetry.get("clogging_index", 100.0))
 
         feature_vector = np.array([[dp, flow, current, ci]])
 
@@ -66,6 +66,9 @@ class MLInferenceService:
         ci_rem = max(0.0, 220.0 - ci)
         rul_hours = float(np.round((ci_rem / 120.0) * 48.0, 1))
 
+        # Dynamic confidence score based on classification certainty
+        conf = float(np.clip(0.85 + 0.12 * (1.0 - abs(fail_prob - 0.5) * 2), 0.70, 0.99))
+
         return PredictionResponse(
             timestamp=datetime.utcnow(),
             anomaly_detected=is_anomaly,
@@ -73,7 +76,7 @@ class MLInferenceService:
             failure_probability=float(np.round(fail_prob, 2)),
             predicted_failure_mode=failure_mode,
             rul_hours=rul_hours,
-            confidence=0.92
+            confidence=float(np.round(conf, 2))
         )
 
 

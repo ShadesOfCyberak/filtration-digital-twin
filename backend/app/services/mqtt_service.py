@@ -1,8 +1,5 @@
 import json
 import asyncio
-import threading
-import time
-import random
 from datetime import datetime
 from typing import Dict, Any, Optional
 import paho.mqtt.client as mqtt
@@ -23,15 +20,17 @@ class MQTTService:
         self.topic_prefix = settings.mqtt.topic_prefix
         self.client: Optional[mqtt.Client] = None
         self.is_connected = False
-        self._simulator_thread = None
         self._running = False
         
-        # Latest telemetry frame cache
+        # Live dynamic telemetry state - populated strictly by IoT device transmissions
+        self.has_received_data = False
+        self.last_telemetry_timestamp: Optional[datetime] = None
+        self.total_frames_received: int = 0
         self.latest_raw_telemetry: Dict[str, float] = {
-            "pressure_inlet": 2.45,
-            "pressure_outlet": 1.95,
-            "flow": 76.5,
-            "current": 3.25
+            "pressure_inlet": 0.0,
+            "pressure_outlet": 0.0,
+            "flow": 0.0,
+            "current": 0.0
         }
 
     def start(self):
@@ -47,8 +46,7 @@ class MQTTService:
             self.client.loop_start()
             logger.info(f"MQTT Client attempting connection to {self.broker_host}:{self.broker_port}")
         except Exception as e:
-            logger.warning(f"MQTT broker connection failed ({e}). Launching background telemetry simulator.")
-            self._start_simulator()
+            logger.warning(f"MQTT broker connection unavailable ({e}). Waiting for device telemetry over HTTP or MQTT reconnect.")
 
     def stop(self):
         self._running = False
@@ -63,8 +61,7 @@ class MQTTService:
             logger.info("Successfully connected to MQTT Broker!")
             client.subscribe(f"{self.topic_prefix}/sensor/#")
         else:
-            logger.warning(f"MQTT connection returned code {rc}. Starting internal telemetry simulator.")
-            self._start_simulator()
+            logger.warning(f"MQTT connection returned code {rc}.")
 
     def _on_disconnect(self, client, userdata, rc):
         self.is_connected = False
@@ -75,20 +72,69 @@ class MQTTService:
             payload = json.loads(msg.payload.decode("utf-8"))
             topic = msg.topic
             
-            # Expecting topic format: filtration/sensor/{sensor_type}
+            # Determine sensor_id from payload or topic hierarchy
+            # Formats:
+            # 1. filtration/sensor/pressure/inlet -> pressure_inlet
+            # 2. filtration/sensor/flow -> flow
+            # 3. payload explicitly contains sensor_id
             parts = topic.split("/")
-            if len(parts) >= 3:
-                sensor_id = parts[2]
+            sensor_id = payload.get("sensor_id")
+            if not sensor_id and len(parts) >= 3:
+                if len(parts) >= 4 and parts[2] == "pressure":
+                    sensor_id = f"pressure_{parts[3]}"
+                else:
+                    sensor_id = parts[2]
+            
+            if sensor_id:
                 val = float(payload.get("value", 0.0))
-                self.latest_raw_telemetry[sensor_id] = val
+                unit = payload.get("unit", "bar")
                 
-                # Ingest through pipeline in background
-                asyncio.run(self.process_incoming_data())
+                # Ingest through dynamic pipeline
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            self.ingest_single_reading(sensor_id, val, unit),
+                            loop
+                        )
+                    else:
+                        loop.run_until_complete(self.ingest_single_reading(sensor_id, val, unit))
+                except RuntimeError:
+                    asyncio.run(self.ingest_single_reading(sensor_id, val, unit))
         except Exception as e:
             logger.error(f"Error handling MQTT message on {msg.topic}: {e}")
 
-    async def process_incoming_data(self):
-        """Run standard telemetry data processing pipeline"""
+    async def ingest_single_reading(self, sensor_id: str, value: float, unit: str = "bar", timestamp: Optional[datetime] = None):
+        """Ingest individual sensor reading from MQTT or REST"""
+        self.latest_raw_telemetry[sensor_id] = value
+        self.has_received_data = True
+        self.last_telemetry_timestamp = timestamp or datetime.utcnow()
+        self.total_frames_received += 1
+        
+        await influx_repo.write_sensor_reading(sensor_id, value, unit=unit, timestamp=self.last_telemetry_timestamp)
+        await self.process_incoming_data()
+
+    async def ingest_telemetry_frame(self, readings: Dict[str, float], timestamp: Optional[datetime] = None) -> Dict[str, Any]:
+        """
+        Dynamically ingest a complete telemetry frame from IoT device (ESP32 via HTTP or MQTT)
+        Readings dict keys: pressure_inlet, pressure_outlet, flow, current
+        """
+        self.latest_raw_telemetry.update(readings)
+        self.has_received_data = True
+        self.last_telemetry_timestamp = timestamp or datetime.utcnow()
+        self.total_frames_received += 1
+
+        # Write each sensor to repository
+        for sensor_id, val in readings.items():
+            unit = "bar" if "pressure" in sensor_id else ("L/min" if sensor_id == "flow" else "A")
+            await influx_repo.write_sensor_reading(sensor_id, val, unit=unit, timestamp=self.last_telemetry_timestamp)
+
+        # Execute dynamic digital twin, health, and alert pipelines
+        result = await self.process_incoming_data()
+        return result
+
+    async def process_incoming_data(self) -> Dict[str, Any]:
+        """Run standard telemetry data processing pipeline strictly on live dynamic data"""
         # Step 1: Filter & extract features
         processed = data_processor.process_telemetry_frame(self.latest_raw_telemetry)
         
@@ -101,10 +147,14 @@ class MQTTService:
         # Step 4: Evaluate Alert Rules
         await alert_service.evaluate_rules(processed, twin_state, health_summary)
         
-        # Step 5: Persist to database repository
+        # Step 5: Persist twin state to database repository
         await influx_repo.write_twin_state(twin_state.dict())
-        for sensor_id, val in self.latest_raw_telemetry.items():
-            await influx_repo.write_sensor_reading(sensor_id, val)
+
+        return {
+            "processed": processed,
+            "twin_state": twin_state.dict(),
+            "health": health_summary.dict()
+        }
 
     def publish_control_command(self, command: str, parameters: dict) -> bool:
         topic = f"{self.topic_prefix}/control/{command}"
@@ -115,41 +165,10 @@ class MQTTService:
             logger.info(f"Published control command '{command}' to topic {topic}")
             return True
         else:
-            logger.info(f"[SIMULATED MQTT] Published command '{command}' with params {parameters}")
+            logger.info(f"[HTTP/MQTT Control] Executed command '{command}' with params {parameters}")
             if command == "backwash":
                 digital_twin_service.trigger_backwash_reset()
             return True
-
-    def _start_simulator(self):
-        if self._simulator_thread and self._simulator_thread.is_alive():
-            return
-        self._simulator_thread = threading.Thread(target=self._simulator_loop, daemon=True)
-        self._simulator_thread.start()
-        logger.info("Internal telemetry simulator thread started.")
-
-    def _simulator_loop(self):
-        """Simulate continuous sensor readings from physical filtration rig"""
-        ci_counter = 0
-        while self._running:
-            try:
-                ci_counter += 1
-                # Simulate gradual filter fouling: Pinlet increases slowly, flow drops slightly
-                fouling_bias = min(1.2, ci_counter * 0.005)
-                
-                self.latest_raw_telemetry["pressure_inlet"] = float(np.round(2.4 + fouling_bias + random.uniform(-0.03, 0.03), 3))
-                self.latest_raw_telemetry["pressure_outlet"] = float(np.round(1.95 + random.uniform(-0.02, 0.02), 3))
-                self.latest_raw_telemetry["flow"] = float(np.round(78.0 - (fouling_bias * 12.0) + random.uniform(-0.5, 0.5), 2))
-                self.latest_raw_telemetry["current"] = float(np.round(3.2 + (fouling_bias * 0.8) + random.uniform(-0.05, 0.05), 2))
-
-                # If backwash occurred in twin service, reset fouling bias counter
-                if digital_twin_service.time_since_backwash < 2.0:
-                    ci_counter = 0
-
-                asyncio.run(self.process_incoming_data())
-                time.sleep(1.0)
-            except Exception as e:
-                logger.error(f"Error in telemetry simulator loop: {e}")
-                time.sleep(2.0)
 
 
 mqtt_service = MQTTService()

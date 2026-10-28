@@ -67,8 +67,9 @@ async def health_check():
         status="healthy",
         timestamp=datetime.utcnow().isoformat() + "Z",
         services={
-            "database": "connected" if influx_repo._connected else "simulated_memory",
-            "mqtt_broker": "connected" if mqtt_service.is_connected else "simulated_stream",
+            "database": "connected" if influx_repo._connected else "in_memory_repository",
+            "mqtt_broker": "connected" if mqtt_service.is_connected else "standby",
+            "telemetry_stream": f"active ({mqtt_service.total_frames_received} frames)" if mqtt_service.has_received_data else "waiting_for_iot_device",
             "digital_twin_engine": "running",
             "ml_inference_service": "loaded"
         },

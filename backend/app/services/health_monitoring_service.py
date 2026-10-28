@@ -41,27 +41,74 @@ class HealthMonitoringService:
             "perf_score": float(np.round(perf_score, 1))
         }
 
+    def evaluate_sensor_health(self, sensor_id: str, value: float, secondary_val: float = None) -> SensorHealth:
+        """Dynamically evaluate sensor health status and noise/validity from real readings"""
+        health_score = 100.0
+        status = "good"
+        
+        if sensor_id == "pressure_inlet":
+            if value <= 0.0 or value > 6.0:
+                health_score = max(10.0, 100.0 - abs(value - 2.5) * 20.0)
+                status = "warning" if health_score > 50 else "faulty"
+            elif secondary_val is not None and value < secondary_val:
+                # Reverse differential pressure anomaly
+                health_score = 40.0
+                status = "faulty"
+            else:
+                health_score = 98.0 - min(20.0, max(0.0, value - 3.5) * 10.0)
+                status = "good"
+        elif sensor_id == "pressure_outlet":
+            if value < 0.0 or value > 6.0:
+                health_score = max(10.0, 100.0 - abs(value - 2.0) * 20.0)
+                status = "warning" if health_score > 50 else "faulty"
+            else:
+                health_score = 98.0
+                status = "good"
+        elif sensor_id == "flow":
+            if value <= 0.0:
+                health_score = 45.0
+                status = "warning"
+            elif value > 120.0:
+                health_score = 50.0
+                status = "warning"
+            else:
+                health_score = 98.0
+                status = "good"
+        elif sensor_id == "current":
+            if value <= 0.0 or value > 10.0:
+                health_score = 40.0
+                status = "warning"
+            else:
+                health_score = 99.0
+                status = "good"
+                
+        return SensorHealth(sensor_id=sensor_id, health_score=float(np.round(health_score, 1)), status=status)
+
     def evaluate_system_health(self, processed_telemetry: Dict[str, Any], twin_state: TwinState) -> SystemHealthSummary:
-        ci = processed_telemetry["clogging_index"]
-        dp = processed_telemetry["pressure_drop"]
-        flow_eff = processed_telemetry["flow_efficiency"]
-        actual_power = processed_telemetry["pump_power"]
+        ci = processed_telemetry.get("clogging_index", 100.0)
+        dp = processed_telemetry.get("pressure_drop", 0.0)
+        flow_eff = processed_telemetry.get("flow_efficiency", 100.0)
+        actual_power = processed_telemetry.get("pump_power", 0.0)
         exp_power = twin_state.expected_pump_power
-        actual_flow = processed_telemetry["flow_rate"]
+        actual_flow = processed_telemetry.get("flow_rate", 0.0)
+        p_in = processed_telemetry.get("pressure_inlet", 0.0)
+        p_out = processed_telemetry.get("pressure_outlet", 0.0)
+        curr = processed_telemetry.get("pump_current", 0.0)
 
         f_metrics = self.calculate_filter_health(ci, dp, flow_eff)
         p_metrics = self.calculate_pump_health(actual_power, exp_power, actual_flow)
 
-        # Sensors health
+        # Dynamic Sensors health calculation
         sensors_health = {
-            "pressure_inlet": SensorHealth(sensor_id="pressure_inlet", health_score=98.0, status="good"),
-            "pressure_outlet": SensorHealth(sensor_id="pressure_outlet", health_score=97.5, status="good"),
-            "flow": SensorHealth(sensor_id="flow", health_score=96.0, status="good"),
-            "current": SensorHealth(sensor_id="current", health_score=99.0, status="good")
+            "pressure_inlet": self.evaluate_sensor_health("pressure_inlet", p_in, p_out),
+            "pressure_outlet": self.evaluate_sensor_health("pressure_outlet", p_out),
+            "flow": self.evaluate_sensor_health("flow", actual_flow),
+            "current": self.evaluate_sensor_health("current", curr)
         }
+        avg_sensor_health = float(np.mean([s.health_score for s in sensors_health.values()]))
 
         # Overall System Health
-        overall_health = 0.50 * f_metrics["filter_health"] + 0.35 * p_metrics["pump_health"] + 0.15 * 97.5
+        overall_health = 0.50 * f_metrics["filter_health"] + 0.35 * p_metrics["pump_health"] + 0.15 * avg_sensor_health
         overall_health = float(np.round(overall_health, 1))
 
         # Status
